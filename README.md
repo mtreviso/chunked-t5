@@ -45,8 +45,9 @@ The overhead of calling the decoder with a longer input is less pronounced since
 ## Training details
 
 cT5-small used T5's weights as a starting point, and then it was finetuned on the English [wikitext-103](https://huggingface.co/datasets/wikitext) dataset for 3 epochs, achieving ~74% validation accuracy.
-The training script can be found in `pretrain_chunked_t5.py`.
-Flax checkpoints can be converted to PyTorch via `convert_flax_to_pytorch.py`.
+The training script is in JAX + Flax and can be found in `pretrain_ct5.py`.
+
+Flax checkpoints can be converted to PyTorch via `convert_flax_to_pytorch.py [flax_dirname]`.
  
 
 ## Usage
