@@ -1,0 +1,21 @@
+export XLA_FLAGS="--xla_gpu_force_compilation_parallelism=1"
+CUDA_VISIBLE_DEVICES=2 python3 pretrain_ct5.py \
+	--output_dir="./ct5-small-en-wiki" \
+	--model_type="t5" \
+	--model_name_or_path="t5-small" \
+	--tokenizer_name="t5-small" \
+	--dataset_name="wikipedia" \
+	--dataset_config_name="20220301.en" \
+	--max_seq_length="512" \
+	--per_device_train_batch_size="32" \
+	--per_device_eval_batch_size="32" \
+	--adafactor \
+	--learning_rate="0.005" \
+	--weight_decay="0.001" \
+	--warmup_steps="2000" \
+	--overwrite_output_dir \
+	--logging_steps="1000" \
+	--save_steps="200000" \
+	--eval_steps="200000" \
+	--push_to_hub \
+	--hub_token "YOUR_HF_TOKEN_ID"
