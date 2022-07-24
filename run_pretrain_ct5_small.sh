@@ -1,5 +1,5 @@
 export XLA_FLAGS="--xla_gpu_force_compilation_parallelism=1"
-CUDA_VISIBLE_DEVICES=2 python3 pretrain_ct5.py \
+CUDA_VISIBLE_DEVICES=0 python3 pretrain_ct5.py \
 	--output_dir="./ct5-small-en-wiki" \
 	--model_type="t5" \
 	--model_name_or_path="t5-small" \

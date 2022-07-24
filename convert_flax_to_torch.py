@@ -1,5 +1,6 @@
+# export XLA_FLAGS="--xla_gpu_force_compilation_parallelism=1"
+
 import sys
-# %env XLA_FLAGS="--xla_gpu_force_compilation_parallelism=1"
 
 
 if __name__ == '__main__':

@@ -9,50 +9,358 @@ from torch.nn.utils.rnn import pad_sequence
 from torch import nn
 
 from transformers.file_utils import ModelOutput
-from transformers.generation_beam_constraints import Constraint
-from transformers.generation_beam_search import BeamScorer, BeamSearchScorer, ConstrainedBeamSearchScorer, \
+from transformers.generation_beam_constraints import Constraint, DisjunctiveConstraint, PhrasalConstraint
+from transformers.generation_beam_search import (
+    BeamScorer,
+    BeamSearchScorer,
+    ConstrainedBeamSearchScorer,
     BeamHypotheses
-from transformers.generation_logits_process import (
-    EncoderNoRepeatNGramLogitsProcessor,
-    ForcedBOSTokenLogitsProcessor,
-    ForcedEOSTokenLogitsProcessor,
-    HammingDiversityLogitsProcessor,
-    InfNanRemoveLogitsProcessor,
-    LogitsProcessorList,
-    MinLengthLogitsProcessor,
-    NoBadWordsLogitsProcessor,
-    NoRepeatNGramLogitsProcessor,
-    PrefixConstrainedLogitsProcessor,
-    RepetitionPenaltyLogitsProcessor,
-    TemperatureLogitsWarper,
-    TopKLogitsWarper,
-    TopPLogitsWarper,
-    TypicalLogitsWarper,
 )
-from transformers.generation_stopping_criteria import (
-    MaxLengthCriteria,
-    MaxTimeCriteria,
-    StoppingCriteria,
-    StoppingCriteriaList,
-    validate_stopping_criteria,
-)
+from transformers.generation_logits_process import LogitsProcessorList
+from transformers.generation_stopping_criteria import StoppingCriteriaList, validate_stopping_criteria
 from transformers.pytorch_utils import torch_int_div
-from transformers.generation_utils import (
-    GreedySearchOutput,
-    SampleOutput,
-    BeamSearchOutput,
-    BeamSampleOutput,
-    GreedySearchDecoderOnlyOutput,
-    GreedySearchEncoderDecoderOutput,
-    SampleDecoderOnlyOutput,
-    SampleEncoderDecoderOutput,
-    BeamSearchDecoderOnlyOutput,
-    BeamSearchEncoderDecoderOutput,
-    BeamSampleDecoderOnlyOutput,
-    BeamSampleEncoderDecoderOutput
-)
-from transformers.pytorch_utils import torch_int_div
+from transformers.utils import logging
 from transformers import T5ForConditionalGeneration
+
+logger = logging.get_logger(__name__)
+
+
+@dataclass
+class GreedySearchDecoderOnlyOutput(ModelOutput):
+    """
+    Base class for outputs of decoder-only generation models using greedy search.
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
+            at each generation step. `(max_length-input_ids.shape[-1],)`-shaped tuple of `torch.FloatTensor` with each
+            tensor of shape `(batch_size, config.vocab_size)`).
+        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
+        inverse_indices: (`tuple(torch.LongTensor)` *optional*, returned when `return_dict_in_generate=True` is passed):
+            Processed batch indices of each chunk at each generation step. `(max_chunk_size,)`-shaped tuple of
+            `torch.LongTensor` with each tensor of shape `(num_non_finished_chunks)`).
+    """
+
+    sequences: torch.LongTensor = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    inverse_indices: Optional[Tuple[torch.LongTensor]] = None
+
+
+@dataclass
+class GreedySearchEncoderDecoderOutput(ModelOutput):
+    """
+    Base class for outputs of encoder-decoder generation models using greedy search. Hidden states and attention
+    weights of the decoder (respectively the encoder) can be accessed via the encoder_attentions and the
+    encoder_hidden_states attributes (respectively the decoder_attentions and the decoder_hidden_states attributes)
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
+            at each generation step. `(max_length-1,)`-shaped tuple of `torch.FloatTensor` with each tensor of shape
+            `(batch_size, config.vocab_size)`).
+        encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer of the decoder) of shape `(batch_size, num_heads,
+            sequence_length, sequence_length)`.
+        encoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size, sequence_length, hidden_size)`.
+        decoder_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        cross_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        decoder_hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
+        inverse_indices: (`tuple(torch.LongTensor)` *optional*, returned when `return_dict_in_generate=True` is passed):
+            Processed batch indices of each chunk at each generation step. `(max_chunk_size,)`-shaped tuple of
+            `torch.LongTensor` with each tensor of shape `(num_non_finished_chunks)`).
+    """
+
+    sequences: torch.LongTensor = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    decoder_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    cross_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    decoder_hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    inverse_indices: Optional[Tuple[torch.LongTensor]] = None
+
+
+@dataclass
+class SampleDecoderOnlyOutput(ModelOutput):
+    """
+    Base class for outputs of decoder-only generation models using sampling.
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size*num_return_sequences, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
+            at each generation step. `(max_length-input_ids.shape[-1],)`-shaped tuple of `torch.FloatTensor` with each
+            tensor of shape `(batch_size*num_return_sequences, config.vocab_size)`).
+        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(num_return_sequences*batch_size, num_heads, generated_length,
+            sequence_length)`.
+        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(num_return_sequences*batch_size, generated_length, hidden_size)`.
+        inverse_indices: (`tuple(torch.LongTensor)` *optional*, returned when `return_dict_in_generate=True` is passed):
+            Processed batch indices of each chunk at each generation step. `(max_chunk_size,)`-shaped tuple of
+            `torch.LongTensor` with each tensor of shape `(num_non_finished_chunks)`).
+    """
+
+    sequences: torch.LongTensor = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    inverse_indices: Optional[Tuple[torch.LongTensor]] = None
+
+
+@dataclass
+class SampleEncoderDecoderOutput(ModelOutput):
+    """
+    Base class for outputs of encoder-decoder generation models using sampling. Hidden states and attention weights of
+    the decoder (respectively the encoder) can be accessed via the encoder_attentions and the encoder_hidden_states
+    attributes (respectively the decoder_attentions and the decoder_hidden_states attributes)
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size*num_return_sequences, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
+            at each generation step. `(max_length-1,)`-shaped tuple of `torch.FloatTensor` with each tensor of shape
+            `(batch_size*num_return_sequences, config.vocab_size)`).
+        encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer of the decoder) of shape
+            `(batch_size*num_return_sequences, num_heads, sequence_length, sequence_length)`.
+        encoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size*num_return_sequences, sequence_length, hidden_size)`.
+        decoder_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_return_sequences, num_heads, generated_length,
+            sequence_length)`.
+        cross_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        decoder_hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_return_sequences, generated_length, hidden_size)`.
+        inverse_indices: (`tuple(torch.LongTensor)` *optional*, returned when `return_dict_in_generate=True` is passed):
+            Processed batch indices of each chunk at each generation step. `(max_chunk_size,)`-shaped tuple of
+            `torch.LongTensor` with each tensor of shape `(num_non_finished_chunks)`).
+    """
+
+    sequences: torch.LongTensor = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    decoder_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    cross_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    decoder_hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    inverse_indices: Optional[Tuple[torch.LongTensor]] = None
+
+
+@dataclass
+class BeamSearchDecoderOnlyOutput(ModelOutput):
+    """
+    Base class for outputs of decoder-only generation models using beam search.
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size*num_return_sequences, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        sequences_scores (`torch.FloatTensor` of shape `(batch_size*num_return_sequences)`, *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Final beam scores of the generated `sequences`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Beam transition scores for each vocabulary token at each generation step. Beam transition scores consisting
+            of log probabilities of tokens conditioned on log softmax of previously generated tokens in this beam.
+            `(max_length-input_ids.shape[-1],)`-shaped tuple of `torch.FloatTensor` with each tensor of shape
+            `(batch_size*num_beams*num_return_sequences, config.vocab_size)`).
+        beam_indices (`tuple(tuple(torch.LongTensor))`, *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Beam indices of generated token id at each generation step. `torch.LongTensor` of shape
+            `(batch_size*num_return_sequences, input_ids.shape[-1])`.
+        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_beams, num_heads, generated_length, sequence_length)`.
+        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_beams*num_return_sequences, generated_length, hidden_size)`.
+        inverse_indices: (`tuple(torch.LongTensor)` *optional*, returned when `return_dict_in_generate=True` is passed):
+            Processed batch indices of each chunk at each generation step. `(max_chunk_size,)`-shaped tuple of
+            `torch.LongTensor` with each tensor of shape `(num_non_finished_chunks)`).
+    """
+
+    sequences: torch.LongTensor = None
+    sequences_scores: Optional[torch.FloatTensor] = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    beam_indices: Optional[torch.LongTensor] = None
+    attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    inverse_indices: Optional[Tuple[torch.LongTensor]] = None
+
+
+@dataclass
+class BeamSearchEncoderDecoderOutput(ModelOutput):
+    """
+    Base class for outputs of encoder-decoder generation models using beam search. Hidden states and attention weights
+    of the decoder (respectively the encoder) can be accessed via the encoder_attentions and the encoder_hidden_states
+    attributes (respectively the decoder_attentions and the decoder_hidden_states attributes)
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size*num_return_sequences, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        sequences_scores (`torch.FloatTensor` of shape `(batch_size*num_return_sequences)`, *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Final beam scores of the generated `sequences`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Beam transition scores for each vocabulary token at each generation step. Beam transition scores consisting
+            of log probabilities of tokens conditioned on log softmax of previously generated tokens in this beam.
+            `(max_length-1,)`-shaped tuple of `torch.FloatTensor` with each tensor of shape `(batch_size*num_beams,
+            config.vocab_size)`).
+        beam_indices (`tuple(tuple(torch.LongTensor))`, *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Beam indices of generated token id at each generation step. `torch.LongTensor` of shape
+            `(batch_size*num_return_sequences, max_length-1)`.
+        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+        encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer of the decoder) of shape `(batch_size, num_heads,
+            sequence_length, sequence_length)`.
+        encoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size*num_beams*num_return_sequences, sequence_length, hidden_size)`.
+        decoder_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_beams*num_return_sequences, num_heads, generated_length,
+            sequence_length)`.
+        cross_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        decoder_hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_beams*num_return_sequences, generated_length, hidden_size)`.
+        inverse_indices: (`tuple(torch.LongTensor)` *optional*, returned when `return_dict_in_generate=True` is passed):
+            Processed batch indices of each chunk at each generation step. `(max_chunk_size,)`-shaped tuple of
+            `torch.LongTensor` with each tensor of shape `(num_non_finished_chunks)`).
+    """
+
+    sequences: torch.LongTensor = None
+    sequences_scores: Optional[torch.FloatTensor] = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    beam_indices: Optional[torch.LongTensor] = None
+    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    decoder_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    cross_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    decoder_hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    inverse_indices: Optional[Tuple[torch.LongTensor]] = None
+
+
+@dataclass
+class BeamSampleDecoderOnlyOutput(ModelOutput):
+    """
+    Base class for outputs of decoder-only generation models using beam sample.
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size*num_return_sequences, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        sequences_scores (`torch.FloatTensor` of shape `(batch_size * num_return_sequence)`, *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Final beam scores of the generated `sequences`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Beam transition scores for each vocabulary token at each generation step. Beam transition scores consisting
+            of log probabilities of tokens conditioned on log softmax of previously generated tokens in this beam.
+            `(max_length-input_ids.shape[-1],)`-shaped tuple of `torch.FloatTensor` with each tensor of shape
+            `(batch_size*num_beams*num_return_sequences, config.vocab_size)`).
+        beam_indices (`tuple(tuple(torch.LongTensor))`, *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Beam indices of generated token id at each generation step. `torch.LongTensor` of shape
+            `(batch_size*num_return_sequences, input_ids.shape[-1])`.
+        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_beams, num_heads, generated_length, sequence_length)`.
+        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_beams, generated_length, hidden_size)`.
+        inverse_indices: (`tuple(torch.LongTensor)` *optional*, returned when `return_dict_in_generate=True` is passed):
+            Processed batch indices of each chunk at each generation step. `(max_chunk_size,)`-shaped tuple of
+            `torch.LongTensor` with each tensor of shape `(num_non_finished_chunks)`).
+    """
+
+    sequences: torch.LongTensor = None
+    sequences_scores: Optional[torch.FloatTensor] = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    beam_indices: Optional[torch.LongTensor] = None
+    attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    inverse_indices: Optional[Tuple[torch.LongTensor]] = None
+
+
+@dataclass
+class BeamSampleEncoderDecoderOutput(ModelOutput):
+    """
+    Base class for outputs of encoder-decoder generation models using beam sampling. Hidden states and attention
+    weights of the decoder (respectively the encoder) can be accessed via the encoder_attentions and the
+    encoder_hidden_states attributes (respectively the decoder_attentions and the decoder_hidden_states attributes)
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size*num_beams, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        sequences_scores (`torch.FloatTensor` of shape `(batch_size * num_return_sequence)`, *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Final beam scores of the generated `sequences`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Beam transition scores for each vocabulary token at each generation step. Beam transition scores consisting
+            of log probabilities of tokens conditioned on log softmax of previously generated tokens in this beam.
+            `(max_length-1,)`-shaped tuple of `torch.FloatTensor` with each tensor of shape `(batch_size*num_beams,
+            config.vocab_size)`).
+        beam_indices (`torch.LongTensor`, *optional*, returned when `output_scores=True` is passed or when `config.output_scores=True`):
+            Beam indices of generated token id at each generation step. `torch.LongTensor` of shape
+            `(batch_size*num_return_sequences, max_length-1)`.
+        encoder_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer of the decoder) of shape `(batch_size, num_heads,
+            sequence_length, sequence_length)`.
+        encoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer) of
+            shape `(batch_size*num_beams, sequence_length, hidden_size)`.
+        decoder_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_beams, num_heads, generated_length, sequence_length)`.
+        cross_attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True` is passed or `config.output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        decoder_hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size*num_beams, generated_length, hidden_size)`.
+        inverse_indices: (`tuple(torch.LongTensor)` *optional*, returned when `return_dict_in_generate=True` is passed):
+            Processed batch indices of each chunk at each generation step. `(max_chunk_size,)`-shaped tuple of
+            `torch.LongTensor` with each tensor of shape `(num_non_finished_chunks)`).
+    """
+
+    sequences: torch.LongTensor = None
+    sequences_scores: Optional[torch.FloatTensor] = None
+    scores: Optional[Tuple[torch.FloatTensor]] = None
+    beam_indices: Optional[torch.LongTensor] = None
+    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    decoder_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    cross_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    decoder_hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    inverse_indices: Optional[Tuple[torch.LongTensor]] = None
+
+
+GreedySearchOutput = Union[GreedySearchEncoderDecoderOutput, GreedySearchDecoderOnlyOutput]
+SampleOutput = Union[SampleEncoderDecoderOutput, SampleDecoderOnlyOutput]
+BeamSearchOutput = Union[BeamSearchEncoderDecoderOutput, BeamSearchDecoderOnlyOutput]
+BeamSampleOutput = Union[BeamSampleEncoderDecoderOutput, BeamSampleDecoderOnlyOutput]
 
 
 class CT5ForConditionalGeneration(T5ForConditionalGeneration):
@@ -105,13 +413,13 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
             decoder_input_ids = self._get_decoder_ids_from_input_ids(inputs_tensor)
             return torch.cat((start_id, decoder_input_ids), dim=-1)
 
-    def _get_decoder_pad_mask(self, input_ids, eos_token_id):
+    def _get_decoder_pad_mask(self, input_ids: torch.LongTensor, eos_token_id: int) -> torch.BoolTensor:
         ar = torch.arange(input_ids.shape[-1], device=input_ids.device)
         ar = ar.unsqueeze(0).expand(input_ids.shape[0], -1)
         pad_mask = ar <= ar[input_ids == eos_token_id].unsqueeze(-1)
         return pad_mask
 
-    def _get_interleaved_positional_ids(self, input_ids, eos_token_id: int = 1):
+    def _get_interleaved_positional_ids(self, input_ids: torch.LongTensor) -> torch.LongTensor:
         interleaved_pos = []
         for i in range(len(input_ids)):
             sentinels = self._is_sentinel(input_ids[i])
@@ -121,7 +429,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
             interleaved_pos.append(pos - pos[sentinels].gather(0, idxs))
         return torch.stack(interleaved_pos)
 
-    def _get_decoder_causal_mask(self, input_ids, pad_token_id: int = 0):
+    def _get_decoder_causal_mask(self, input_ids: torch.LongTensor) -> torch.BoolTensor:
         interleaved_pos = self._get_interleaved_positional_ids(input_ids)
         causal_mask = interleaved_pos[:, None, :] <= interleaved_pos[:, :, None]
         # pads = input_ids != pad_token_id
@@ -291,8 +599,10 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 The id of the *beginning-of-sequence* token.
             eos_token_id (`int`, *optional*):
                 The id of the *end-of-sequence* token.
-            eoc_token_id (`int`, *optional*):
+            eoc_token_id (`int`, *required*):
                 The id of the *end-of-chunk* token.
+            max_chunk_size (`int`, *optional*, defaults to 999999)
+                The maximum size of the chunk to be generated.
             length_penalty (`float`, *optional*, defaults to 1.0):
                  Exponential penalty to the length. 1.0 means that the beam score is penalized by the sequence length.
                  0.0 means no penalty. Set to values < 0.0 in order to encourage the model to generate longer
@@ -449,12 +759,22 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
 
         pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
         eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
-        max_chunk_size = max_chunk_size if max_chunk_size is not None else 999999
 
-        assert use_cache is False
+        if max_chunk_size is None:
+            logger.warning(
+                "The max chunk size to was not set. As a consequence, the model might generate spans that are longer "
+                "than the max chunk size. This can cause the generation to slow down."
+            )
+            max_chunk_size = 999999
+
+        if use_cache:
+            logger.warning(
+                "cT5 does not support caching. Setting use_cache to False."
+            )
+            use_cache = False
 
         if eoc_token_id is None:
-            raise ValueError("Make sure that `eoc_token_id` is defined.")
+            raise ValueError("Make sure that `eoc_token_id` is defined as the id of `</c>`.")
 
         if eos_token_id is None and hasattr(self.config, "decoder"):
             eos_token_id = self.config.decoder.eos_token_id
@@ -889,9 +1209,10 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
         if ignored_ids is not None:
             logits[..., ignored_ids] = -999999.0
         # recover next_token_logits
-        last_input_mask = input_mask.roll(-1, dims=-1).unsqueeze(-1)
-        next_token_logits = logits.masked_select(last_input_mask)
-        next_token_logits = next_token_logits.reshape(-1, logits.shape[-1])
+        last_input_mask = input_mask.roll(-1, dims=-1)
+        next_token_logits = logits[last_input_mask]
+        # next_token_logits = logits.masked_select(last_input_mask)
+        # next_token_logits = next_token_logits.reshape(-1, logits.shape[-1])
         return next_token_logits
 
     def _batched_repeat_interleave(self, inp, reps, pad_token_id=0):
@@ -902,18 +1223,21 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
             # fix reps so that we can use vmap
             rep_lens = reps.sum(-1)
             max_rep = rep_lens.max().item()
-            ar = torch.arange(max_rep, device=input_ids.device).unsqueeze(0).expand(input_ids.shape[0], -1)
-            pad_mask = ar < rep_lens.unsqueeze(-1)
+            ar = torch.arange(max_rep, device=inp.device).unsqueeze(0).expand(inp.shape[0], -1)
+            pad_mask = ar < rep_lens.unsqueeze(-1) + 1
             reps[:, -1] += max_rep - rep_lens
 
             # repeat_interleave mask at masked positions
             rep_inp = batched_repeat_interleave(inp, reps)
             # replace over-repeated positions with pad
             rep_inp = rep_inp.masked_fill(~pad_mask, pad_token_id)
+            # fix corner case of when the last token is the eos
+            # and it was repeated
+            after_eos_mask = ar > max_rep - reps[:, -1].unsqueeze(-1)
+            rep_inp = rep_inp.masked_fill(after_eos_mask, pad_token_id)
             return rep_inp
-
-        except:
-            # print('vmap is not available, using slow version')
+        except ImportError:
+            # logger.warning('vmap is not available, using slow version')
             rep_inp = [inp[i].repeat_interleave(reps[i]) for i in range(len(reps))]
             rep_inp = pad_sequence(rep_inp, batch_first=True, padding_value=pad_token_id)
             return rep_inp
@@ -955,9 +1279,8 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
             output_scores: Optional[bool] = None,
             return_dict_in_generate: Optional[bool] = None,
             synced_gpus: Optional[bool] = False,
-            parallel_decoding: Optional[bool] = True,
             eoc_token_id: Optional[int] = None,
-            max_chunk_size: Optional[int] = 5,
+            max_chunk_size: Optional[int] = 999999,
             **model_kwargs,
     ) -> Union[GreedySearchOutput, torch.LongTensor]:
         r"""
@@ -991,6 +1314,10 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
             synced_gpus (`bool`, *optional*, defaults to `False`):
                 Whether to continue running the while loop until max_length (needed for ZeRO stage 3)
+            eoc_token_id (`int`, *required*):
+                The id of the *end-of-chunk* token.
+            max_chunk_size (`int`, *optional*, defaults to 999999)
+                The maximum size of the chunk to be generated.
             model_kwargs:
                 Additional model specific keyword arguments will be forwarded to the `forward` function of the model.
                 If model is an encoder-decoder model the kwargs should include `encoder_outputs`.
@@ -1055,7 +1382,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
         decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
         cross_attentions = () if (return_dict_in_generate and output_attentions) else None
         decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
-        inverse_idxs = () if (return_dict_in_generate) else None
+        inverse_idxs = () if return_dict_in_generate else None
 
         # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
         if return_dict_in_generate and self.config.is_encoder_decoder:
@@ -1064,7 +1391,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
             )
 
-        # ids that shouldnt be generated with ct5
+        # ids that should not be generated by ct5
         ignored_ids = list(range(32000, 32099 + 1))
         ignored_ids += [pad_token_id, eos_token_id]
         # keep track of which sequences are already finished
@@ -1084,14 +1411,14 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 if this_peer_finished_flag.item() == 0.0:
                     break
 
-            # prepare model inputs
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-
             # recover input_mask
             decoder_pad_mask = self._get_decoder_pad_mask(input_ids, eos_token_id)
             input_mask = self._recover_input_mask_from_input_ids(input_ids, decoder_pad_mask, pad_token_id)
             # recover the actual number of <masked> tokens
             num_masks = input_mask.sum().item()
+
+            # prepare model inputs
+            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # forward pass to get next token
             outputs = self(
@@ -1136,10 +1463,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                         if self.config.is_encoder_decoder
                         else (outputs.hidden_states,)
                     )
-                ar = torch.arange(input_mask.shape[0], device=input_mask.device).unsqueeze(-1).expand(-1,
-                                                                                                      input_mask.shape[
-                                                                                                          -1])
-                inverse_idxs += (ar[input_mask],)
+                inverse_idxs += (input_mask.long().nonzero()[:, 0],)
 
             # argmax
             next_tokens = torch.argmax(next_tokens_scores, dim=-1)
@@ -1174,11 +1498,6 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                     this_peer_finished = True
 
         if return_dict_in_generate:
-            inverse_idxs = torch.cat(inverse_idxs)
-            rev_inverse_idxs = inverse_idxs.argsort()
-            slices = torch.unique(inverse_idxs, return_counts=True)[1].cumsum(dim=-1)
-            scores = torch.cat(scores)[rev_inverse_idxs].tensor_split(slices)[:-1]
-
             if self.config.is_encoder_decoder:
                 return GreedySearchEncoderDecoderOutput(
                     sequences=input_ids,
@@ -1188,6 +1507,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                     decoder_attentions=decoder_attentions,
                     cross_attentions=cross_attentions,
                     decoder_hidden_states=decoder_hidden_states,
+                    inverse_indices=inverse_idxs,
                 )
             else:
                 return GreedySearchDecoderOnlyOutput(
@@ -1195,6 +1515,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                     scores=scores,
                     attentions=decoder_attentions,
                     hidden_states=decoder_hidden_states,
+                    inverse_indices=inverse_idxs,
                 )
         else:
             return input_ids
@@ -1213,9 +1534,8 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
             output_scores: Optional[bool] = None,
             return_dict_in_generate: Optional[bool] = None,
             synced_gpus: Optional[bool] = False,
-            parallel_decoding: Optional[bool] = True,
             eoc_token_id: Optional[int] = None,
-            max_chunk_size: Optional[int] = 5,
+            max_chunk_size: Optional[int] = 999999,
             **model_kwargs,
     ) -> Union[SampleOutput, torch.LongTensor]:
         r"""
@@ -1253,6 +1573,10 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
             synced_gpus (`bool`, *optional*, defaults to `False`):
                 Whether to continue running the while loop until max_length (needed for ZeRO stage 3)
+            eoc_token_id (`int`, *required*):
+                The id of the *end-of-chunk* token.
+            max_chunk_size (`int`, *optional*, defaults to 999999)
+                The maximum size of the chunk to be generated.
             model_kwargs:
                 Additional model specific kwargs will be forwarded to the `forward` function of the model. If model is
                 an encoder-decoder model the kwargs should include `encoder_outputs`.
@@ -1333,6 +1657,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
         decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
         cross_attentions = () if (return_dict_in_generate and output_attentions) else None
         decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
+        inverse_idxs = () if return_dict_in_generate else None
 
         # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
         if return_dict_in_generate and self.config.is_encoder_decoder:
@@ -1341,7 +1666,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
             )
 
-        # ids that shouldnt be generated with ct5
+        # ids that should not be generated by ct5
         ignored_ids = list(range(32000, 32099 + 1))
         ignored_ids += [pad_token_id, eos_token_id]
         # keep track of which sequences are already finished
@@ -1415,6 +1740,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                         if self.config.is_encoder_decoder
                         else (outputs.hidden_states,)
                     )
+                inverse_idxs += (input_mask.long().nonzero()[:, 0],)
 
             # sample
             probs = nn.functional.softmax(next_token_scores, dim=-1)
@@ -1458,6 +1784,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                     decoder_attentions=decoder_attentions,
                     cross_attentions=cross_attentions,
                     decoder_hidden_states=decoder_hidden_states,
+                    inverse_indices=inverse_idxs,
                 )
             else:
                 return SampleDecoderOnlyOutput(
@@ -1465,6 +1792,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                     scores=scores,
                     attentions=decoder_attentions,
                     hidden_states=decoder_hidden_states,
+                    inverse_indices=inverse_idxs,
                 )
         else:
             return input_ids
@@ -1483,9 +1811,8 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
             output_scores: Optional[bool] = None,
             return_dict_in_generate: Optional[bool] = None,
             synced_gpus: Optional[bool] = False,
-            parallel_decoding: Optional[bool] = True,
             eoc_token_id: Optional[int] = None,
-            max_chunk_size: Optional[int] = 5,
+            max_chunk_size: Optional[int] = 999999,
             **model_kwargs,
     ) -> Union[BeamSearchOutput, torch.LongTensor]:
         r"""
@@ -1522,6 +1849,10 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
             synced_gpus (`bool`, *optional*, defaults to `False`):
                 Whether to continue running the while loop until max_length (needed for ZeRO stage 3)
+            eoc_token_id (`int`, *required*):
+                The id of the *end-of-chunk* token.
+            max_chunk_size (`int`, *optional*, defaults to 999999)
+                The maximum size of the chunk to be generated.
             model_kwargs:
                 Additional model specific kwargs will be forwarded to the `forward` function of the model. If model is
                 an encoder-decoder model the kwargs should include `encoder_outputs`.
@@ -1613,6 +1944,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
         decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
         cross_attentions = () if (return_dict_in_generate and output_attentions) else None
         decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
+        inverse_idxs = () if return_dict_in_generate else None
 
         # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
         if return_dict_in_generate and self.config.is_encoder_decoder:
@@ -1621,7 +1953,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
             )
 
-        # ids that shouldnt be generated with ct5
+        # ids that should not be generated by ct5
         ignored_ids = list(range(32000, 32099 + 1))
         ignored_ids += [pad_token_id, eos_token_id]
         # keep track of which sequences are already finished
@@ -1644,8 +1976,8 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # recover input_mask
-            decoder_attention_mask = model_inputs['decoder_attention_mask']
-            input_mask = self._recover_input_mask_from_input_ids(input_ids, decoder_attention_mask, pad_token_id)
+            decoder_pad_mask = self._get_decoder_pad_mask(input_ids, eos_token_id)
+            input_mask = self._recover_input_mask_from_input_ids(input_ids, decoder_pad_mask, pad_token_id)
             input_mask |= input_ids == eoc_token_id
             # recover the actual number of <masked> tokens
             num_masks = input_mask.sum().item()
@@ -1715,6 +2047,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                         if self.config.is_encoder_decoder
                         else (outputs.hidden_states,)
                     )
+                inverse_idxs += (input_mask.long().nonzero()[:, 0],)
 
             # reshape for beam search
             vocab_size = next_token_scores.shape[-1]
@@ -1798,6 +2131,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                     decoder_attentions=decoder_attentions[valid_idxs],
                     cross_attentions=cross_attentions[valid_idxs],
                     decoder_hidden_states=decoder_hidden_states[valid_idxs],
+                    inverse_indices=inverse_idxs,
                 )
             else:
                 return BeamSearchDecoderOnlyOutput(
@@ -1807,6 +2141,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                     beam_indices=sequence_outputs["beam_indices"][valid_idxs],
                     attentions=decoder_attentions[valid_idxs],
                     hidden_states=decoder_hidden_states[valid_idxs],
+                    inverse_indices=inverse_idxs,
                 )
         else:
             return sequence_outputs["sequences"][valid_idxs]
@@ -1826,9 +2161,8 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
             output_scores: Optional[bool] = None,
             return_dict_in_generate: Optional[bool] = None,
             synced_gpus: Optional[bool] = False,
-            parallel_decoding: Optional[bool] = True,
             eoc_token_id: Optional[int] = None,
-            max_chunk_size: Optional[int] = 5,
+            max_chunk_size: Optional[int] = 999999,
             **model_kwargs,
     ) -> Union[BeamSampleOutput, torch.LongTensor]:
         r"""
@@ -1869,6 +2203,10 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
             synced_gpus (`bool`, *optional*, defaults to `False`):
                 Whether to continue running the while loop until max_length (needed for ZeRO stage 3)
+            eoc_token_id (`int`, *required*):
+                The id of the *end-of-chunk* token.
+            max_chunk_size (`int`, *optional*, defaults to 999999)
+                The maximum size of the chunk to be generated.
             model_kwargs:
                 Additional model specific kwargs will be forwarded to the `forward` function of the model. If model is
                 an encoder-decoder model the kwargs should include `encoder_outputs`.
@@ -1963,6 +2301,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
         decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
         cross_attentions = () if (return_dict_in_generate and output_attentions) else None
         decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
+        inverse_idxs = () if return_dict_in_generate else None
 
         # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
         if return_dict_in_generate and self.config.is_encoder_decoder:
@@ -1971,7 +2310,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                 model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
             )
 
-        # ids that shouldnt be generated with ct5
+        # ids that should not be generated by ct5
         ignored_ids = list(range(32000, 32099 + 1))
         ignored_ids += [pad_token_id, eos_token_id]
         # keep track of which sequences are already finished
@@ -1994,8 +2333,8 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # recover input_mask
-            decoder_attention_mask = model_inputs['decoder_attention_mask']
-            input_mask = self._recover_input_mask_from_input_ids(input_ids, decoder_attention_mask, pad_token_id)
+            decoder_pad_mask = self._get_decoder_pad_mask(input_ids, eos_token_id)
+            input_mask = self._recover_input_mask_from_input_ids(input_ids, decoder_pad_mask, pad_token_id)
             input_mask |= input_ids == eoc_token_id
             # recover the actual number of <masked> tokens
             num_masks = input_mask.sum().item()
@@ -2066,6 +2405,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                         if self.config.is_encoder_decoder
                         else (outputs.hidden_states,)
                     )
+                inverse_idxs += (input_mask.long().nonzero()[:, 0],)
 
             # reshape for beam search
             vocab_size = next_token_scores.shape[-1]
@@ -2149,6 +2489,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                     decoder_attentions=decoder_attentions[valid_idxs],
                     cross_attentions=cross_attentions[valid_idxs],
                     decoder_hidden_states=decoder_hidden_states[valid_idxs],
+                    inverse_indices=inverse_idxs,
                 )
             else:
                 return BeamSampleDecoderOnlyOutput(
@@ -2158,6 +2499,7 @@ class CT5ForConditionalGeneration(T5ForConditionalGeneration):
                     beam_indices=sequence_outputs["beam_indices"][valid_idxs],
                     attentions=decoder_attentions[valid_idxs],
                     hidden_states=decoder_hidden_states[valid_idxs],
+                    inverse_indices=inverse_idxs,
                 )
         else:
             return sequence_outputs["sequences"][valid_idxs]

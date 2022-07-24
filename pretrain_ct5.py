@@ -48,16 +48,15 @@ from transformers import (
     FLAX_MODEL_FOR_MASKED_LM_MAPPING,
     AutoTokenizer,
     BatchEncoding,
-    FlaxT5ForConditionalGeneration,
     HfArgumentParser,
     PreTrainedTokenizerBase,
     T5Config,
     is_tensorboard_available,
     set_seed,
 )
-from transformers.models.t5.modeling_flax_t5 import shift_tokens_right, FlaxT5Attention
 from transformers.utils import get_full_repo_name, send_example_telemetry
-from my_t5 import MyFlaxT5ForConditionalGeneration
+
+from modeling_flax_ct5 import FlaxT5ForConditionalGeneration, shift_tokens_right
 
 MODEL_CONFIG_CLASSES = list(FLAX_MODEL_FOR_MASKED_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
@@ -376,19 +375,10 @@ class FlaxDataCollatorForT5MLM:
         input_ids_sentinel = self.create_sentinel_ids(mask_indices.astype(np.int8))
         input_ids_sentinel = self.filter_input_ids(input_ids, input_ids_sentinel)
 
-        # replace <extra_id_*> by <mask>
-        # input_ids_sentinel[input_ids_sentinel >= 32000] = self.tokenizer.mask_token_id
-
-        # labels_sentinel = self.create_sentinel_ids(labels_mask.astype(np.int8))
-        # labels_sentinel = (input_ids * mask_indices) + (1 - mask_indices) * (-100)
-        # decoder_ids_sentinel = input_ids * 1
-
         labels_ids_sentinel = self.create_sentinel_ids(labels_mask.astype(np.int8))
         labels_ids_sentinel = self.filter_input_ids(input_ids, labels_ids_sentinel)
 
         # add </c> after each masked span
-        # last_indices = mask_indices * 1 - np.roll(mask_indices, -1, axis=-1) * mask_indices
-
         last_indices = np.roll((labels_ids_sentinel >= 32000) * 1, -1, axis=-1)
         last_indices[:, -1] = 0
         last_indices[:, -2] = 1
@@ -397,30 +387,12 @@ class FlaxDataCollatorForT5MLM:
             for i in range(batch_size)
         ]
 
+        # stack and pad
         label_ids_sentinel = np.zeros((batch_size, max(map(len, labels_sentinel_with_sep))),
                                       dtype=np.int32) + self.tokenizer.pad_token_id
         for i in range(batch_size):
             n = len(labels_sentinel_with_sep[i])
             label_ids_sentinel[i, :n] = labels_sentinel_with_sep[i]
-
-        # decoder_ids_sentinel_with_step = [
-        #     np.insert(decoder_ids_sentinel[i], last_indices[i].nonzero()[0] + 1, self.tokenizer.sep_token_id)
-        #     for i in range(batch_size)
-        # ]
-        # stack and pad
-        #         label_ids_sentinel = np.zeros((batch_size, max(map(len, labels_sentinel_with_sep)) + 1), dtype=np.int32)
-        #         label_ids_sentinel = label_ids_sentinel - 100
-        #         for i in range(batch_size):
-        #             n = len(labels_sentinel_with_sep[i])
-        #             label_ids_sentinel[i, :n] = labels_sentinel_with_sep[i]
-        #             label_ids_sentinel[i, n] = self.tokenizer.eos_token_id
-
-        #         decoder_ids_sentinel = np.zeros((batch_size, max(map(len, decoder_ids_sentinel_with_step)) + 1), dtype=np.int32)
-        #         decoder_ids_sentinel = decoder_ids_sentinel + self.pad_token_id
-        #         for i in range(batch_size):
-        #             n = len(decoder_ids_sentinel_with_step[i])
-        #             decoder_ids_sentinel[i, :n] = decoder_ids_sentinel_with_step[i]
-        #             decoder_ids_sentinel[i, n] = self.tokenizer.eos_token_id
 
         # last_indices
         batch["input_ids"] = input_ids_sentinel
@@ -431,11 +403,6 @@ class FlaxDataCollatorForT5MLM:
         batch["decoder_input_ids"] = shift_tokens_right(
             label_ids_sentinel, self.pad_token_id, self.decoder_start_token_id
         )
-
-        # batch["decoder_input_ids"] = batch["labels"]
-        # batch['decoder_input_ids'] = shift_tokens_right(
-        #     batch["labels"], self.pad_token_id, self.decoder_start_token_id
-        # )
 
         def get_interleaved_positional_ids(decoder_ids):
             pos_all = []
@@ -456,22 +423,22 @@ class FlaxDataCollatorForT5MLM:
         decoder_pad_mask = batch["decoder_input_ids"] != self.tokenizer.pad_token_id
         decoder_pad_mask[:, 0] = True
         pos_ids = get_interleaved_positional_ids(batch["decoder_input_ids"])
-        decoder_attention_mask = pos_ids[:, None, :] <= pos_ids[:, :, None]
+        decoder_causal_mask = pos_ids[:, None, :] <= pos_ids[:, :, None]
 
         batch["attention_mask"] = encoder_attention_mask
-        batch["decoder_attention_mask"] = decoder_attention_mask & decoder_pad_mask[:, None, :]
+        batch["decoder_attention_mask"] = decoder_causal_mask & decoder_pad_mask[:, None, :]
 
-        #         if self.input_length is not None and batch["input_ids"].shape[-1] != self.input_length:
-        #             raise ValueError(
-        #                 f"`input_ids` are incorrectly preprocessed. `input_ids` length is {batch['input_ids'].shape[-1]}, but"
-        #                 f" should be {self.input_length}."
-        #             )
-
-        #         if self.target_length is not None and batch["labels"].shape[-1] != self.target_length:
-        #             raise ValueError(
-        #                 f"`labels` are incorrectly preprocessed. `labels` length is {batch['labels'].shape[-1]}, but should be"
-        #                 f" {self.target_length}."
-        #             )
+        # if self.input_length is not None and batch["input_ids"].shape[-1] != self.input_length:
+        #     raise ValueError(
+        #         f"`input_ids` are incorrectly preprocessed. `input_ids` length is {batch['input_ids'].shape[-1]}, but"
+        #         f" should be {self.input_length}."
+        #     )
+        #
+        # if self.target_length is not None and batch["labels"].shape[-1] != self.target_length:
+        #     raise ValueError(
+        #         f"`labels` are incorrectly preprocessed. `labels` length is {batch['labels'].shape[-1]}, but should be"
+        #         f" {self.target_length}."
+        #     )
 
         return batch
 

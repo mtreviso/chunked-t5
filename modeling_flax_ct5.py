@@ -12,7 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Flax T5 model."""
+""" Flax cT5 model.
+
+This file contains a simple modification to T5's self attention class in which
+a 3-dimensional decoder attention mask can be passed as input, and caching is disabled.
+"""
 
 
 import copy
@@ -29,22 +33,22 @@ from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax.random import PRNGKey
 
-from ...modeling_flax_outputs import (
+from transformers.modeling_flax_outputs import (
     FlaxBaseModelOutput,
     FlaxBaseModelOutputWithPastAndCrossAttentions,
     FlaxCausalLMOutputWithCrossAttentions,
     FlaxSeq2SeqLMOutput,
     FlaxSeq2SeqModelOutput,
 )
-from ...modeling_flax_utils import (
+from transformers.modeling_flax_utils import (
     ACT2FN,
     FlaxPreTrainedModel,
     append_call_sample_docstring,
     append_replace_return_docstrings,
     overwrite_call_docstring,
 )
-from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
-from .configuration_t5 import T5Config
+from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
+from transformers.models.t5.configuration_t5 import T5Config
 
 
 logger = logging.get_logger(__name__)
