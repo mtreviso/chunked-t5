@@ -105,3 +105,15 @@ It is possible to make it faster by using a custom BeamScores and BeamHypotheses
 
 See the notebook `evaluate_ct5.ipynb` for an example of how to evaluate cT5 in terms of accuracy and perplexity.
 The notebook `profile.ipynb` shows how to profile the model to get runtimes.
+
+Here is a comparison between cT5 and T5 on a subset of the WikiText-103 dataset using deterministic greedy search:
+
+
+ | Metric              | cT5       | T5         |
+|---------------------|-----------|------------|
+| **Exact match**       | **0.09**  | **0.10**   |
+| **Edit distance ratio** | **0.58**  | **0.57**   |
+| **Perplexity**          | **1.54**  | **3.36**   |
+| **Time (seconds)**      | **10.69** | **118.43** |
+
+On this toy dataset, cT5 has a lower perplexity while being faster than T5. However, more experiments are needed for a rigorous evaluation.
