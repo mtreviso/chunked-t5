@@ -99,10 +99,10 @@ This will produce the following tokens:
 You have to pass `use_cache=False` to `generate()` in order to avoid caching during the generation procedure as caching is not available for parallel decoding. 
 Currently, parallel decoding is only supported for PyTorch (greedy search, greedy sampling, beam search, beam sampling) and JAX (greedy search and greedy sampling).
 
-**Note on the beam search implementation**: my beam search implementation is slower than optimal.
+**Note on the beam search implementation**: my beam search implementation is slower than optimal, even though it is faster than the vanilla left-to-right beam search.
 This is because I use the structures provided by HuggingFace's implementation, namely, BeamScores and BeamHypotheses to store the beam search results for each chunk in the input.
 In other words, my implementation computes independent "beams" for each chunk rather than for each input sequence.
-It is possible to make it faster by using a custom BeamScores and BeamHypotheses class, but I haven't done that yet.
+It is possible to make it faster by using a custom BeamScores and BeamHypotheses class, but I haven't done that yet. 
 
 
 ## Evaluation
