@@ -41,7 +41,7 @@ The overhead of calling the decoder with a longer input is less pronounced since
 
 cT5 models used T5's weights as a starting point, and then it was finetuned on the 
 English [wikipedia](https://huggingface.co/datasets/wikipedia) for 3 epochs, 
-achieving ~74% validation accuracy (ct5-small).
+achieving ~74% validation accuracy (ct5-small and ct5-base).
 The training script is in JAX + Flax and can be found in `pretrain_ct5.py`.
 
 Flax checkpoints can be converted to PyTorch via `convert_flax_to_pytorch.py [flax_dirname]`.
@@ -50,7 +50,7 @@ Flax checkpoints can be converted to PyTorch via `convert_flax_to_pytorch.py [fl
 ## Checkpoints
 
 - ct5-small: https://huggingface.co/mtreviso/ct5-small-en-wiki
-- ct5-base: todo
+- ct5-base: https://huggingface.co/mtreviso/ct5-base-en-wiki
 - ct5-large: todo
 
 
