@@ -112,7 +112,7 @@ The notebook `profile.ipynb` shows how to profile the model to get runtimes.
 
 Here is a comparison between cT5-small and T5-small on a subset of the WikiText-103 dataset using deterministic greedy search:
 
-| Model | Exact match ↑ | Edit distance ratio ↑ | Perplexity ↓ | Time (seconds) ↓ |
+| Model | Exact match ↑ | Fuzzy match ↑ | Perplexity ↓ | Time (seconds) ↓ |
 |-------|---------------|----------------------|--------------|-----------------|
 | T5-small | 0.11          | 0.60                 | 2.22         | 44.71           |
 | cT5-small | 0.09          | 0.58                 | 1.48         | 10.63           |
@@ -120,3 +120,13 @@ Here is a comparison between cT5-small and T5-small on a subset of the WikiText-
 On this toy dataset, cT5-small has a lower perplexity while being faster than T5-small. However, more experiments are needed for a rigorous evaluation.
 
 If you are interested in applying cT5 to real data, please contact me.
+
+
+## New eval
+
+| Model | Exact match ↑ | Fuzzy match ↑ |  Word Error Rate ↓ | Perplexity ↓ | Perplexity by GPT-2 ↓ | BERTScore F1 ↑ |  Time (seconds) ↓ |
+|-------|---------------|---------------|--------------------|--------------|-----------------------|----------------|-------------------|
+| T5-small  | 0.121 | 0.451 | 0.184 | 12.70 | 118.38 | 57.15 | 44.71 |
+| cT5-small | 0.095 | 0.580 | 0.169 | 16.96 | 275.33 | 56.99 | 17.31 |
+| T5-base   | 0.182 | 0.528 | 0.163 | 15.52 | 168.06 | 57.55 | 77.22 |
+| cT5-base  | 0.066 | 0.585 | 0.167 | 18.35 | 274.33 | 56.90 | 24.47 |
